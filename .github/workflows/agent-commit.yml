@@ -80,11 +80,15 @@ jobs:
               f.write(f"changed={'1' if changed else '0'}\n")
           PY
 
-      - name: Commit to main
-        if: ${{ steps.apply.outputs.changed == '1' }}
+- name: Commit to main (only if there are changes)
         run: |
           git config user.name "agent-bot"
           git config user.email "agent-bot@users.noreply.github.com"
           git add -A
+          # If nothing staged, exit successfully (don’t fail the job)
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
           git commit -m "agent: apply from issue #${{ github.event.issue.number }}"
           git push
