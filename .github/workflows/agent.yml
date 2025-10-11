@@ -9,10 +9,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
       - name: Parse issue and generate change
         env: { GITHUB_EVENT: ${{ toJson(github.event) }} }
         run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import os, json, re, pathlib
           ev=json.loads(os.environ['GITHUB_EVENT'])
           title=(ev.get('issue',{}).get('title') or '').strip()
@@ -20,39 +22,26 @@ jobs:
           cmd=(title+"\n"+body).lower()
           base=pathlib.Path('.'); changed=False
           def ensure(p,txt):
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_text(txt, encoding='utf-8')
-
-          m=re.search(r'gen:\s*page\s*([/\w\-]+)', cmd)   # GEN: page /hello
+              p.parent.mkdir(parents=True, exist_ok=True); p.write_text(txt, encoding='utf-8')
+          m=re.search(r'gen:\s*page\s*([/\w\-]+)', cmd)  # GEN: page /hello
           if m:
-              slug=m.group(1).strip('/')
-              for c in ['src/app','app','src/pages','pages']:
-                  if (base/c).exists():
-                      root=c; break
-              else:
-                  root='app'; (base/root).mkdir(parents=True, exist_ok=True)
-              if 'pages' in root:
-                  path=base/root/(slug + '.tsx')
-                  ensure(path, f"export default function Page(){{return(<main><h1>/{slug}</h1><p>Auto-generated.</p></main>);}}")
-              else:
-                  path=base/root/slug/'page.tsx'
-                  ensure(path, "export default function Page(){return(<main><h1>/" + slug + "</h1><p>Auto-generated.</p></main>);}")
-              changed=True
-
-          if not changed:
-              log=base/'AGENT_LOG.md'
-              with open(log, ('a' if log.exists() else 'w'), encoding='utf-8') as f:
-                  f.write(f"Issue #{ev['issue']['number']}: {title}\n\n{body}\n\n")
-              changed=True
-
+            slug=m.group(1).strip('/')
+            for c in ['src/app','app','src/pages','pages']:
+              if (base/c).exists(): root=c; break
+            else:
+              root='app'; (base/root).mkdir(parents=True, exist_ok=True)
+            if 'pages' in root:
+              path=base/root/(slug+'.tsx'); ensure(path, f"export default function Page(){{return(<main><h1>/{slug}</h1><p>Auto-generated.</p></main>);}}")
+            else:
+              path=base/root/slug/'page.tsx'; ensure(path, "export default function Page(){return(<main><h1>/" + slug + "</h1><p>Auto-generated.</p></main>);}")
+            changed=True
           open('_CHANGED.flag','w').write('1' if changed else '0')
           PY
-
-      - name: Create pull request
+      - name: Open Pull Request
         if: ${{ hashFiles('_CHANGED.flag') != '' }}
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore(agent): apply issue #${{ github.event.issue.number }}"
+          commit-message: "agent: apply issue #${{ github.event.issue.number }}"
           branch: "agent/issue-${{ github.event.issue.number }}"
           title: "Agent change from issue #${{ github.event.issue.number }}"
           body: "Auto-generated change based on issue #${{ github.event.issue.number }}."
