@@ -2,105 +2,82 @@ name: agent
 
 on:
   issues:
-    types:
-      - opened
-      - edited
+    types: [opened, edited]
 
 permissions:
   contents: write
 
-concurrency:
-  group: agent-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  run:
+  gen:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
-      - name: Run agent (seed if needed + GEN page)
-        id: agent
-        env:
-          GITHUB_EVENT: ${{ toJson(github.event) }}
+      - name: Generate Next.js page from issue title
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import os, json, re, pathlib, textwrap
+          set -euo pipefail
+          echo "== Agent start =="
 
-          ev=json.loads(os.environ["GITHUB_EVENT"])
-          title=(ev.get("issue",{}).get("title") or "").strip()
-          body =(ev.get("issue",{}).get("body")  or "")
-          cmd=(title+"\n"+body).lower()
+          title="${{ github.event.issue.title }}"
+          body="${{ github.event.issue.body || '' }}"
+          echo "TITLE: $title"
+          echo "BODY  : ${body:0:60}..."
 
-          root=pathlib.Path(".")
-          changed=False
+          # Lowercase “GEN: page /slug” command detection
+          cmd="$(printf '%s\n%s' "$title" "$body" | tr 'A-Z' 'a-z')"
+          if [[ "$cmd" =~ ^gen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASH_REMATCH[1]#/}"
+            echo "Detected command → create route: /$slug"
+          else
+            echo "No 'GEN: page /...' command found. Done."
+            exit 0
+          fi
 
-          def write(p, txt):
-              p.parent.mkdir(parents=True, exist_ok=True)
-              p.write_text(textwrap.dedent(txt).lstrip("\n"), encoding="utf-8")
-              print("WROTE", p)
+          # Pick base dir (prefer app router)
+          if [ -d app ]; then base=app
+          elif [ -d src/app ]; then base=src/app
+          elif [ -d src/pages ]; then base=src/pages
+          else base=pages; fi
+          echo "Using base dir: $base"
 
-          # ---- Seed minimal Next.js app if missing ----
-          if not (root/"package.json").exists():
-              write(root/"package.json", """{
-                "name":"weave-dashboard","private":true,"version":"0.1.0",
-                "scripts":{"dev":"next dev","build":"next build","start":"next start"},
-                "dependencies":{"next":"^14.2.33","react":"^18.3.1","react-dom":"^18.3.1"},
-                "devDependencies":{"typescript":"^5.6.3","@types/node":"^20.14.10","@types/react":"^18.3.5","@types/react-dom":"^18.3.0"}
-              }""")
-              write(root/"next.config.mjs", "/** @type {import('next').NextConfig} */\nexport default {};\n")
-              write(root/"tsconfig.json", """{
-                "compilerOptions": { "target":"ES2020","lib":["dom","esnext"],"strict":false,"noEmit":true,
-                  "module":"esnext","moduleResolution":"bundler","jsx":"preserve","plugins":[{"name":"next"}]},
-                "include":["next-env.d.ts","**/*.ts","**/*.tsx"],"exclude":["node_modules"]
-              }""")
-              write(root/"next-env.d.ts", "/// <reference types='next' />\n/// <reference types='next/image-types/global' />\n")
-              write(root/".gitignore", "node_modules\n.next\nout\n")
-              write(root/"app"/"layout.tsx",
-                    "export default function RootLayout({children}:{children:React.ReactNode}){return(<html lang='en'><body style={{fontFamily:'system-ui, Arial',padding:24}}>{children}</body></html>);}")
-              write(root/"app"/"page.tsx",
-                    "export default function Page(){return(<main style={{padding:24}}><h1>Dashboard</h1><p>Seeded by CI.</p></main>);}")
-              changed=True
+          # Compute file path
+          if [[ "$base" == *pages ]]; then
+            path="$base/${slug}.tsx"
+          else
+            path="$base/$slug/page.tsx"
+          fi
+          echo "Target file: $path"
 
-          # ---- Command: GEN: page /slug ----
-          m=re.search(r"^gen:\s*page\s*([/\w\-]+)", cmd, flags=re.MULTILINE)
-          if m:
-              slug=m.group(1).strip("/")
-              appdir=None
-              for c in ["src/app","app","src/pages","pages"]:
-                  if (root/c).exists():
-                      appdir=c; break
-              if appdir is None:
-                  appdir="app"; (root/appdir).mkdir(parents=True, exist_ok=True)
+          # Skip if already exists
+          if [ -f "$path" ]; then
+            echo "Page already exists → $path (nothing to do)."
+            exit 0
+          fi
 
-              if "pages" in appdir:
-                  path = root/appdir/(slug + ".tsx")
-                  if not path.exists():
-                      write(path, f"export default function Page(){{return(<main style={{padding:24}}><h1>/{slug}</h1><p>Auto-generated.</p></main>);}}")
-                      changed=True
-              else:
-                  path = root/appdir/slug/"page.tsx"
-                  if not path.exists():
-                      write(path, f"export default function Page(){{return(<main style={{padding:24}}><h1>/{slug}</h1><p>Auto-generated.</p></main>);}}")
-                      changed=True
+          # Write file
+          mkdir -p "$(dirname "$path")"
+          cat > "$path" <<'TSX'
+          export default function Page(){
+            return (
+              <main style={{ padding: 24 }}>
+                <h1>REPLACEME</h1>
+                <p>Auto-generated.</p>
+              </main>
+            );
+          }
+          TSX
+          sed -i "s|REPLACEME|/${slug}|g" "$path"
+          echo "WROTE: $path"
 
-          # expose result to next step
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"changed={'1' if changed else '0'}\n")
-          PY
-
-      - name: Commit changes (only if something changed)
-        if: ${{ steps.agent.outputs.changed == '1' }}
-        run: |
+          # Commit only if there are changes
           git config user.name "agent-bot"
           git config user.email "agent-bot@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No changes staged. Exiting successfully."
             exit 0
           fi
-          git commit -m "agent: apply from issue #${{ github.event.issue.number }}"
+          git commit -m "agent: add page /$slug from issue #${{ github.event.issue.number }}"
           git push
+          echo "== Agent done =="
