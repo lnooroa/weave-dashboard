@@ -1,83 +1,115 @@
 name: agent
-
 on:
   issues:
     types: [opened, edited]
-
 permissions:
   contents: write
+concurrency:
+  group: agent-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  gen:
+  run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate Next.js page from issue title
+      - name: GEN/DEL/REGEN Next.js page from Issue title
         shell: bash
         run: |
           set -euo pipefail
-          echo "== Agent start =="
-
+          echo "== agent start =="
           title="${{ github.event.issue.title }}"
           body="${{ github.event.issue.body || '' }}"
-          echo "TITLE: $title"
-          echo "BODY  : ${body:0:60}..."
-
-          # Lowercase “GEN: page /slug” command detection
           cmd="$(printf '%s\n%s' "$title" "$body" | tr 'A-Z' 'a-z')"
-          if [[ "$cmd" =~ ^gen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
-            slug="${BASH_REMATCH[1]#/}"
-            echo "Detected command → create route: /$slug"
-          else
-            echo "No 'GEN: page /...' command found. Done."
-            exit 0
-          fi
+          echo "TITLE: $title"
+          echo "CMD  : ${cmd:0:120}..."
 
-          # Pick base dir (prefer app router)
+          # choose base directory (prefer app router)
           if [ -d app ]; then base=app
           elif [ -d src/app ]; then base=src/app
           elif [ -d src/pages ]; then base=src/pages
-          else base=pages; fi
-          echo "Using base dir: $base"
+          else base=app; fi
+          mkdir -p "$base"
+          echo "BASE : $base"
 
-          # Compute file path
-          if [[ "$base" == *pages ]]; then
-            path="$base/${slug}.tsx"
-          else
-            path="$base/$slug/page.tsx"
+          # helpers
+          mk_path() {
+            local slug="${1#/}"
+            if [[ "$base" == *pages ]]; then
+              echo "$base/${slug}.tsx"
+            else
+              echo "$base/$slug/page.tsx"
+            fi
+          }
+          write_tpl() {
+cat > "$1" <<'TSX'
+export default function Page() {
+  return (
+    <main>
+      <h1>REPLACEME</h1>
+      <p>Auto-generated.</p>
+    </main>
+  );
+}
+TSX
+            sed -i "s|REPLACEME|/$2|g" "$1"
+            echo "WROTE: $1"
+          }
+
+          changed=0
+
+          # GEN: page /slug
+          if [[ "$cmd" =~ ^gen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASH_REMATCH[1]#/}"
+            path="$(mk_path "$slug")"
+            if [ -f "$path" ]; then
+              echo "EXISTS: $path (skipping GEN)"; 
+            else
+              mkdir -p "$(dirname "$path")"
+              write_tpl "$path" "$slug"
+              changed=1
+            fi
           fi
-          echo "Target file: $path"
 
-          # Skip if already exists
-          if [ -f "$path" ]; then
-            echo "Page already exists → $path (nothing to do)."
+          # DEL: page /slug
+          if [[ "$cmd" =~ ^del:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASH_REMATCH[1]#/}"
+            path="$(mk_path "$slug")"
+            if [ -f "$path" ]; then
+              git rm -f "$path"
+              echo "DELETED: $path"
+              changed=1
+            else
+              echo "NOTHING TO DELETE: $path"
+            fi
+          fi
+
+          # REGEN: page /slug  (delete if exists, then write fresh)
+          if [[ "$cmd" =~ ^regen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASHREMATCH[1]#/}"
+          fi
+          if [[ "$cmd" =~ ^regen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASH_REMATCH[1]#/}"
+            path="$(mk_path "$slug")"
+            if [ -f "$path" ]; then git rm -f "$path"; echo "DELETED: $path"; changed=1; fi
+            mkdir -p "$(dirname "$path")"
+            write_tpl "$path" "$slug"
+            changed=1
+          fi
+
+          if [ $changed -eq 0 ]; then
+            echo "NO-OP: no supported command or no changes needed."
             exit 0
           fi
 
-          # Write file
-          mkdir -p "$(dirname "$path")"
-          cat > "$path" <<'TSX'
-          export default function Page(){
-            return (
-              <main style={{ padding: 24 }}>
-                <h1>REPLACEME</h1>
-                <p>Auto-generated.</p>
-              </main>
-            );
-          }
-          TSX
-          sed -i "s|REPLACEME|/${slug}|g" "$path"
-          echo "WROTE: $path"
-
-          # Commit only if there are changes
           git config user.name "agent-bot"
           git config user.email "agent-bot@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes staged. Exiting successfully."
+            echo "No staged changes; exit 0."
             exit 0
           fi
-          git commit -m "agent: add page /$slug from issue #${{ github.event.issue.number }}"
+          git commit -m "agent: apply '${title}' from issue #${{ github.event.issue.number }}"
           git push
-          echo "== Agent done =="
+          echo "== agent done =="
