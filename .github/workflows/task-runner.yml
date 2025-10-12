@@ -1,0 +1,84 @@
+name: task-runner
+on:
+  issues:
+    types: [opened, edited]
+permissions:
+  contents: write
+concurrency:
+  group: task-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Execute RUN commands from issue title/body
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== task-runner start =="
+          echo "TITLE: $ISSUE_TITLE"
+          echo "BODY  : ${#ISSUE_BODY} chars"
+
+          # Collect commands: any line beginning with 'RUN: ' in title or body.
+          mapfile -t CMDS < <(printf '%s\n%s\n' "$ISSUE_TITLE" "${ISSUE_BODY:-}" | sed -n 's/^[[:space:]]*RUN:[[:space:]]\{0,1\}\(.*\)$/\1/p')
+          if [ "${#CMDS[@]}" -eq 0 ]; then
+            echo "No RUN commands found. Nothing to do."; exit 0
+          fi
+          echo "Found ${#CMDS[@]} RUN command(s)."
+
+          # Allowlist the first word for safety.
+          # Expand later if you need more tooling.
+          ALLOWED_RE='^(npm|npx|pnpm|yarn|node|bun|echo|printf|mkdir|touch|cp|mv|rm|sed|awk|curl|bash|sh)[[:space:]]'
+
+          LOG_DIR=".weave/logs"; mkdir -p "$LOG_DIR"
+          LOG_FILE="$LOG_DIR/issue-${ISSUE_NUMBER}.log"
+          {
+            echo "## Task ${ISSUE_NUMBER} — $(date -u +%FT%TZ)"
+            i=0
+            for raw in "${CMDS[@]}"; do
+              cmd="$(echo "$raw" | sed 's/[[:space:]]*$//')"
+              i=$((i+1))
+              echo ""
+              echo "--- [$i/${#CMDS[@]}] RUN: $cmd"
+              if ! echo "$cmd" | grep -Eq "$ALLOWED_RE"; then
+                echo "SKIPPED (not allowed by policy)"
+                continue
+              fi
+              set +e
+              timeout 240s bash -lc "$cmd"
+              RC=$?
+              set -e
+              echo "exit code: $RC"
+            done
+          } | tee "$LOG_FILE"
+
+          # Commit repo changes if any
+          git config user.name "task-bot"
+          git config user.email "task-bot@users.noreply.github.com"
+          git add -A || true
+          if git diff --cached --quiet; then
+            CHANGED=0
+            echo "No repo changes to commit."
+          else
+            CHANGED=1
+            git commit -m "task(${ISSUE_NUMBER}): apply RUN commands"
+            git push
+          fi
+
+          # Comment summary back to the Issue (no jq needed)
+          SAFE_LOG=$(sed 's/\\/\\\\/g; s/"/\\"/g' "$LOG_FILE")
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            -X POST \
+            -d "{\"body\":\"**task-runner summary**\\n\\n\`\`\`\\n$SAFE_LOG\\n\`\`\`\"}" \
+            "https://api.github.com/repos/$GH_REPO/issues/$ISSUE_NUMBER/comments" >/dev/null
+
+          echo "== task-runner done =="
