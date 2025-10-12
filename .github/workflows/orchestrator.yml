@@ -12,30 +12,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Seed dashboard, GEN/DEL pages, enable self-evolve
+      - name: Seed dashboard / GEN & DEL pages
         shell: bash
         env:
-          TITLE: ${{ github.event.issue.title }}
-          BODY: ${{ github.event.issue.body }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           echo "== orchestrator start =="
-          title="$TITLE"
-          body="${BODY:-}"
+
+          title="$ISSUE_TITLE"
+          body="${ISSUE_BODY:-}"
           cmd="$(printf '%s\n%s' "$title" "$body" | tr '[:upper:]' '[:lower:]')"
           echo "TITLE: $title"
           echo "CMD  : ${cmd:0:160}..."
+
           changed=0
 
-          # choose Next base dir (prefer app router)
+          # pick Next base dir (prefer app router)
           if [ -d app ]; then base=app
           elif [ -d src/app ]; then base=src/app
           elif [ -d src/pages ]; then base=src/pages
           elif [ -d pages ]; then base=pages
           else base=app; fi
           mkdir -p "$base"
+          echo "BASE : $base"
 
+          # helpers
           mk_path() {
             local slug="${1#/}"
             if [[ "$base" == *pages ]]; then
@@ -44,59 +48,46 @@ jobs:
               echo "$base/$slug/page.tsx"
             fi
           }
-
           write_page() {
-            local path="$1"; local route="$2"
-            mkdir -p "$(dirname "$path")"
-            cat > "$path" <<'TSX'
-            export default function Page() {
-              return (
-                <main style={{ padding: 24, fontFamily: "system-ui, Arial" }}>
-                  <h1>__ROUTE__</h1>
-                  <p>Auto-generated.</p>
-                </main>
-              );
-            }
-TSX
-            sed -i "s|__ROUTE__|/$route|g" "$path"
-            echo "WROTE: $path"
+            local target="$1"; local route="$2"
+            mkdir -p "$(dirname "$target")"
+            cat > "$target" <<EOF
+          export default function Page() {
+            return (
+              <main style={{ padding: 24, fontFamily: "system-ui, Arial" }}>
+                <h1>/$route</h1>
+                <p>Auto-generated.</p>
+              </main>
+            );
+          }
+          EOF
+            echo "WROTE: $target"
           }
 
-          # --- SEED: dashboard ---
+          # SEED: dashboard
           if [[ "$cmd" =~ ^seed:\ *dashboard ]]; then
-            dash="$base/dashboard/page.tsx"
-            mkdir -p "$(dirname "$dash")"
-            cat > "$dash" <<'TSX'
-            export default function Dashboard() {
-              const issueBase = "https://github.com/__REPO__/issues/new?title=";
-              return (
-                <main style={{ padding: 24, fontFamily: "system-ui, Arial" }}>
-                  <h1>Weave Dashboard</h1>
-                  <p>Tap a link to open a pre-filled GitHub Issue (no typing):</p>
-                  <ul>
-                    <li><a target="_blank" href={issueBase + encodeURIComponent("GEN: page /hello2")}>Create /hello2</a></li>
-                    <li><a target="_blank" href={issueBase + encodeURIComponent("GEN: page /about")}>Create /about</a></li>
-                    <li><a target="_blank" href={issueBase + encodeURIComponent("ENABLE: self-evolve")}>Enable self-evolve</a></li>
-                  </ul>
-                </main>
-              );
-            }
-TSX
-            sed -i "s|__REPO__|$REPO|g" "$dash"
-
-            api="$base/api/health/route.ts"
-            mkdir -p "$(dirname "$api")"
-            cat > "$api" <<'TS'
-            import { NextResponse } from "next/server";
-            export async function GET() {
-              return NextResponse.json({ ok: true, repo: "__REPO__", time: new Date().toISOString() });
-            }
-TS
-            sed -i "s|__REPO__|$REPO|g" "$api"
+            dash_path="$(mk_path dashboard)"; dash_dir="$(dirname "$dash_path")"
+            mkdir -p "$dash_dir"
+            cat > "$dash_dir/page.tsx" <<EOF
+          export default function Dashboard() {
+            return (
+              <main style={{ padding: 24, fontFamily: "system-ui, Arial" }}>
+                <h1>Weave Dashboard</h1>
+                <p>Tap a link to open a prefilled Issue:</p>
+                <ul>
+                  <li><a target="_blank" href="https://github.com/$REPO/issues/new?title=GEN:%20page%20/hello2">Create /hello2</a></li>
+                  <li><a target="_blank" href="https://github.com/$REPO/issues/new?title=GEN:%20page%20/about">Create /about</a></li>
+                  <li><a target="_blank" href="https://github.com/$REPO/issues/new?title=DEL:%20page%20/about">Delete /about</a></li>
+                </ul>
+              </main>
+            );
+          }
+          EOF
+            echo "WROTE: $dash_dir/page.tsx"
             changed=1
           fi
 
-          # --- GEN: page /slug ---
+          # GEN: page /slug
           if [[ "$cmd" =~ ^gen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
             slug="${BASH_REMATCH[1]#/}"
             target="$(mk_path "$slug")"
@@ -108,7 +99,7 @@ TS
             fi
           fi
 
-          # --- DEL: page /slug ---
+          # DEL: page /slug
           if [[ "$cmd" =~ ^del:\ *page\ *(/[a-z0-9/_-]+) ]]; then
             slug="${BASH_REMATCH[1]#/}"
             target="$(mk_path "$slug")"
@@ -121,41 +112,7 @@ TS
             fi
           fi
 
-          # --- ENABLE: self-evolve ---
-          if [[ "$cmd" =~ ^enable:\ *self-evolve ]]; then
-            mkdir -p .github/workflows
-            cat > .github/workflows/self-evolve.yml <<'YML'
-            name: self-evolve
-            on:
-              schedule:
-                - cron: "0 20 * * 1"
-              workflow_dispatch: {}
-            permissions:
-              contents: write
-              pull-requests: write
-            jobs:
-              propose:
-                runs-on: ubuntu-latest
-                steps:
-                  - uses: actions/checkout@v4
-                  - name: Propose small weekly tweak
-                    run: |
-                      set -e
-                      mkdir -p dashboard
-                      echo "- weekly heartbeat $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> dashboard/CHANGELOG.md
-                  - name: Open PR
-                    uses: peter-evans/create-pull-request@v6
-                    with:
-                      commit-message: "self: weekly heartbeat"
-                      title: "Self-evolution: weekly heartbeat"
-                      branch: "self/weekly-${{ github.run_id }}"
-                      body: "Automated small change to verify the loop."
-            YML
-            echo "WROTE: .github/workflows/self-evolve.yml"
-            changed=1
-          fi
-
-          # commit if changed
+          # commit only if changed
           if [ "$changed" -eq 1 ]; then
             git config user.name "orchestrator-bot"
             git config user.email "orchestrator-bot@users.noreply.github.com"
@@ -167,7 +124,7 @@ TS
             git commit -m "orchestrator: apply '$title'"
             git push
           else
-            echo "NO-OP (no matching command or nothing changed)."
+            echo "NO-OP (no matching command or nothing changed)"
           fi
 
           echo "== orchestrator done =="
