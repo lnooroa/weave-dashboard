@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "max_loops": 4,
+  "build_cmd": "npm run build",
+  "allow_run": ["npm","npx","pnpm","yarn","node","bun","echo","printf","mkdir","touch","cp","mv","rm","sed","awk","bash","sh","curl"]
+}
