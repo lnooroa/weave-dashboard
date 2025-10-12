@@ -1,0 +1,173 @@
+name: orchestrator
+on:
+  issues:
+    types: [opened, edited]
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed dashboard, GEN/DEL pages, enable self-evolve
+        shell: bash
+        env:
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "== orchestrator start =="
+          title="$TITLE"
+          body="${BODY:-}"
+          cmd="$(printf '%s\n%s' "$title" "$body" | tr '[:upper:]' '[:lower:]')"
+          echo "TITLE: $title"
+          echo "CMD  : ${cmd:0:160}..."
+          changed=0
+
+          # choose Next base dir (prefer app router)
+          if [ -d app ]; then base=app
+          elif [ -d src/app ]; then base=src/app
+          elif [ -d src/pages ]; then base=src/pages
+          elif [ -d pages ]; then base=pages
+          else base=app; fi
+          mkdir -p "$base"
+
+          mk_path() {
+            local slug="${1#/}"
+            if [[ "$base" == *pages ]]; then
+              echo "$base/${slug}.tsx"
+            else
+              echo "$base/$slug/page.tsx"
+            fi
+          }
+
+          write_page() {
+            local path="$1"; local route="$2"
+            mkdir -p "$(dirname "$path")"
+            cat > "$path" <<'TSX'
+            export default function Page() {
+              return (
+                <main style={{ padding: 24, fontFamily: "system-ui, Arial" }}>
+                  <h1>__ROUTE__</h1>
+                  <p>Auto-generated.</p>
+                </main>
+              );
+            }
+TSX
+            sed -i "s|__ROUTE__|/$route|g" "$path"
+            echo "WROTE: $path"
+          }
+
+          # --- SEED: dashboard ---
+          if [[ "$cmd" =~ ^seed:\ *dashboard ]]; then
+            dash="$base/dashboard/page.tsx"
+            mkdir -p "$(dirname "$dash")"
+            cat > "$dash" <<'TSX'
+            export default function Dashboard() {
+              const issueBase = "https://github.com/__REPO__/issues/new?title=";
+              return (
+                <main style={{ padding: 24, fontFamily: "system-ui, Arial" }}>
+                  <h1>Weave Dashboard</h1>
+                  <p>Tap a link to open a pre-filled GitHub Issue (no typing):</p>
+                  <ul>
+                    <li><a target="_blank" href={issueBase + encodeURIComponent("GEN: page /hello2")}>Create /hello2</a></li>
+                    <li><a target="_blank" href={issueBase + encodeURIComponent("GEN: page /about")}>Create /about</a></li>
+                    <li><a target="_blank" href={issueBase + encodeURIComponent("ENABLE: self-evolve")}>Enable self-evolve</a></li>
+                  </ul>
+                </main>
+              );
+            }
+TSX
+            sed -i "s|__REPO__|$REPO|g" "$dash"
+
+            api="$base/api/health/route.ts"
+            mkdir -p "$(dirname "$api")"
+            cat > "$api" <<'TS'
+            import { NextResponse } from "next/server";
+            export async function GET() {
+              return NextResponse.json({ ok: true, repo: "__REPO__", time: new Date().toISOString() });
+            }
+TS
+            sed -i "s|__REPO__|$REPO|g" "$api"
+            changed=1
+          fi
+
+          # --- GEN: page /slug ---
+          if [[ "$cmd" =~ ^gen:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASH_REMATCH[1]#/}"
+            target="$(mk_path "$slug")"
+            if [ ! -f "$target" ]; then
+              write_page "$target" "$slug"
+              changed=1
+            else
+              echo "EXISTS: $target"
+            fi
+          fi
+
+          # --- DEL: page /slug ---
+          if [[ "$cmd" =~ ^del:\ *page\ *(/[a-z0-9/_-]+) ]]; then
+            slug="${BASH_REMATCH[1]#/}"
+            target="$(mk_path "$slug")"
+            if [ -f "$target" ]; then
+              git rm -f "$target"
+              echo "DELETED: $target"
+              changed=1
+            else
+              echo "NOTHING TO DELETE: $target"
+            fi
+          fi
+
+          # --- ENABLE: self-evolve ---
+          if [[ "$cmd" =~ ^enable:\ *self-evolve ]]; then
+            mkdir -p .github/workflows
+            cat > .github/workflows/self-evolve.yml <<'YML'
+            name: self-evolve
+            on:
+              schedule:
+                - cron: "0 20 * * 1"
+              workflow_dispatch: {}
+            permissions:
+              contents: write
+              pull-requests: write
+            jobs:
+              propose:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: actions/checkout@v4
+                  - name: Propose small weekly tweak
+                    run: |
+                      set -e
+                      mkdir -p dashboard
+                      echo "- weekly heartbeat $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> dashboard/CHANGELOG.md
+                  - name: Open PR
+                    uses: peter-evans/create-pull-request@v6
+                    with:
+                      commit-message: "self: weekly heartbeat"
+                      title: "Self-evolution: weekly heartbeat"
+                      branch: "self/weekly-${{ github.run_id }}"
+                      body: "Automated small change to verify the loop."
+            YML
+            echo "WROTE: .github/workflows/self-evolve.yml"
+            changed=1
+          fi
+
+          # commit if changed
+          if [ "$changed" -eq 1 ]; then
+            git config user.name "orchestrator-bot"
+            git config user.email "orchestrator-bot@users.noreply.github.com"
+            git add -A
+            if git diff --cached --quiet; then
+              echo "No staged changes."
+              exit 0
+            fi
+            git commit -m "orchestrator: apply '$title'"
+            git push
+          else
+            echo "NO-OP (no matching command or nothing changed)."
+          fi
+
+          echo "== orchestrator done =="
